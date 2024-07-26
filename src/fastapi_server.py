@@ -6,10 +6,14 @@ import openai
 from dotenv import load_dotenv
 import os
 from fastapi_pagination import Page, add_pagination, paginate
+from fastapi_pagination.utils import disable_installed_extensions_check
 from fastapi.responses import JSONResponse
 import pprint
 
 app = FastAPI()
+
+# Disable pagination extensions check warning
+disable_installed_extensions_check()
 
 # Load environment variables from .env file
 load_dotenv()
