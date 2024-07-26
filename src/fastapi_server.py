@@ -6,7 +6,6 @@ import openai
 from dotenv import load_dotenv
 import os
 from fastapi_pagination import Page, add_pagination, paginate
-from fastapi_pagination.bases import AbstractPage
 from fastapi.responses import JSONResponse
 import pprint
 
@@ -70,8 +69,19 @@ def fetch_from_yahoo_finance(symbol: str):
         return {"error": str(e)}
 
 
+@app.middleware("http")
+def add_pagination_headers(request: Request, call_next):
+    response = call_next(request)
+    if isinstance(response, JSONResponse) and isinstance(response.body, dict):
+        data = response.body
+        if 'items' in data and isinstance(data['items'], list):
+            response.headers['X-Total-Count'] = str(len(data['items']))
+            response.headers['X-Page-Count'] = str((len(data['items']) // 10) + 1)
+    return response
+
+
 @app.post("/predict", response_model=Page[dict])
-async def predict(stock_request: StockRequest, request: Request):
+def predict(stock_request: StockRequest, request: Request):
     symbol = stock_request.symbol
 
     # Fetch data from Alpha Vantage
@@ -83,7 +93,6 @@ async def predict(stock_request: StockRequest, request: Request):
     if (alpha_vantage_stock_data and 'Information' in alpha_vantage_stock_data and
             'Thank you for using Alpha Vantage! Our standard API rate limit is 25 requests per day.' in
             alpha_vantage_stock_data['Information']):
-
         yahoo_data = fetch_from_yahoo_finance(symbol)
         if not yahoo_data or "error" in yahoo_data:
             raise HTTPException(status_code=404, detail="Stock data not found")
@@ -110,9 +119,9 @@ async def predict(stock_request: StockRequest, request: Request):
         }
 
     # Format the data for the OpenAI prompt
-    prompt = f"Predict the next movement for the stock {symbol} based on the following data: {combined_data}"
+    prompt = f"Predict the next movement for the stock {symbol} based on the following data: {pprint.pformat(combined_data)}"
 
-    models = ["gpt-3.5-turbo", "gpt-4"]
+    models = ["gpt-4-turbo"]
 
     predictions = {}
 
@@ -121,34 +130,31 @@ async def predict(stock_request: StockRequest, request: Request):
             response = openai.ChatCompletion.create(
                 model=model,
                 messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                max_tokens=100,
+                n=1,
+                stop=None,
+                temperature=0.5
             )
-            prediction = response['choices'][0]['message']['content'].strip()
+            prediction = response.choices[0].message['content'].strip()
             predictions[model] = prediction
-        except openai.APIError as e:
-            # Handle API error here, e.g. retry or log
-            print(f"OpenAI API returned an API Error: {e}")
-            return {"error": f"OpenAI API returned an API Error: {e}"}
         except openai.APIConnectionError as e:
             # Handle connection error here
             print(f"Failed to connect to OpenAI API: {e}")
             return {"error": f"Failed to connect to OpenAI API: {e}"}
+        except openai.APIError as e:
+            error_details = e.error
+            print(f"OpenAI API returned an API Error: {error_details}")
+            return paginate([{"data": {"error": "OpenAI API returned an API Error", "details": error_details}}])
         except openai.RateLimitError as e:
-            # Handle rate limit error (we recommend using exponential backoff)
-            print(f"OpenAI API request exceeded rate limit: {e}")
-            return {"error": f"OpenAI API request exceeded rate limit: {e}"}
+            error_details = e.error
+            print(f"OpenAI API request exceeded rate limit: {error_details}")
+            return paginate([{"data": {"error": "OpenAI API request exceeded rate limit", "details": error_details}}])
 
     combined_data["predictions"] = predictions
     return paginate([{"data": combined_data}])
-
-
-@app.middleware("http")
-async def add_pagination_headers(request: Request, call_next):
-    response: JSONResponse = await call_next(request)
-    if isinstance(response, AbstractPage):
-        response.headers.update(response.additional_headers())
-    return response
 
 
 add_pagination(app)
